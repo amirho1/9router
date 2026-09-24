@@ -1,0 +1,75 @@
+services:
+  9router:
+    image: decolua/9router:latest
+    container_name: 9router
+    restart: unless-stopped
+
+    environment:
+      NODE_ENV: production
+
+      HOSTNAME: "0.0.0.0"
+      PORT: "20128"
+
+      DATA_DIR: /app/data
+
+      BASE_URL: "https://9router.web-father.ir"
+      NEXT_PUBLIC_BASE_URL: "https://9router.web-father.ir"
+
+      JWT_SECRET: ${JWT_SECRET}
+      INITIAL_PASSWORD: ${INITIAL_PASSWORD}
+
+      # Keep Node reasonable on a 512 MB VPS.
+      NODE_OPTIONS: "--max-old-space-size=220"
+
+    volumes:
+      - 9router-data:/app/data
+
+    expose:
+      - "20128"
+
+    mem_limit: 300m
+    mem_reservation: 128m
+
+    networks:
+      - 9router-network
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: 9router-caddy
+    restart: unless-stopped
+
+    command:
+      - caddy
+      - reverse-proxy
+      - --from
+      - 9router.web-father.ir
+      - --to
+      - 9router:20128
+      - --access-log
+
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+    mem_limit: 80m
+    mem_reservation: 20m
+
+    networks:
+      - 9router-network
+
+    depends_on:
+      - 9router
+
+volumes:
+  9router-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  9router-network:
+    driver: bridge
