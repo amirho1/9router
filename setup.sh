@@ -4,7 +4,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$PROJECT_DIR/.env"
-COMPOSE_FILE="$PROJECT_DIR/compose.yml"
+COMPOSE_FILE="$PROJECT_DIR/docker-compose.yaml"
 
 DOMAIN="9router.web-father.ir"
 
@@ -33,7 +33,7 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 if [ ! -f "$COMPOSE_FILE" ]; then
-    echo "ERROR: compose.yml was not found at:"
+    echo "ERROR: docker-compose.yaml was not found at:"
     echo "$COMPOSE_FILE"
     exit 1
 fi
