@@ -7,6 +7,7 @@ ENV_FILE="$PROJECT_DIR/.env"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yaml"
 
 DOMAIN="9router.web-father.ir"
+WARP_DOMAIN="warp.web-father.ir"
 
 echo "======================================"
 echo "  9Router Deployment"
@@ -86,10 +87,13 @@ if [ ! -f "$ENV_FILE" ]; then
 
     JWT_SECRET="$(openssl rand -hex 64)"
     INITIAL_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | head -c 24)"
+    WARP_PROXY_PASSWORD="$(openssl rand -hex 32)"
 
     cat >"$ENV_FILE" <<EOF
 JWT_SECRET=${JWT_SECRET}
 INITIAL_PASSWORD=${INITIAL_PASSWORD}
+WARP_PROXY_USER=warp
+WARP_PROXY_PASSWORD=${WARP_PROXY_PASSWORD}
 EOF
 
     chmod 600 "$ENV_FILE"
@@ -103,6 +107,22 @@ else
     echo "Existing secrets will NOT be replaced."
 
     NEW_ENV_CREATED=false
+
+    # Preserve every existing value; add only credentials missing from older deployments.
+    if ! grep -q '^WARP_PROXY_USER=' "$ENV_FILE"; then
+        printf '\nWARP_PROXY_USER=warp\n' >>"$ENV_FILE"
+    fi
+
+    if ! grep -q '^WARP_PROXY_PASSWORD=' "$ENV_FILE"; then
+        printf '\nWARP_PROXY_PASSWORD=%s\n' "$(openssl rand -hex 32)" >>"$ENV_FILE"
+    fi
+
+    chmod 600 "$ENV_FILE"
+fi
+
+if grep -Eq '^WARP_PROXY_(USER|PASSWORD)=$' "$ENV_FILE"; then
+    echo "ERROR: WARP proxy credentials in .env must not be empty."
+    exit 1
 fi
 
 # ---------------------------------------------------------
@@ -126,6 +146,7 @@ echo "======================================"
 echo
 echo "URL:"
 echo "  https://${DOMAIN}"
+echo "  https://${WARP_DOMAIN} (proxy access notice; proxy stays on the Docker network)"
 echo
 
 if [ "$NEW_ENV_CREATED" = true ]; then
@@ -150,5 +171,6 @@ echo
 echo "  docker compose logs -f"
 echo "  docker compose logs -f 9router"
 echo "  docker compose logs -f caddy"
+echo "  docker compose logs -f warp-proxy"
 echo "  docker stats"
 echo

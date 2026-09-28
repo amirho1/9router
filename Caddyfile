@@ -1,0 +1,11 @@
+9router.web-father.ir {
+    log
+    reverse_proxy 9router:20128
+}
+
+# Stock Caddy cannot serve as an HTTPS forward proxy for SOCKS5/CONNECT.
+# Keep the authenticated proxy private to the Docker network.
+warp.web-father.ir {
+    log
+    respond "WARP proxy access is available only inside 9router-network." 403
+}
