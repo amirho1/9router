@@ -154,17 +154,18 @@ function removeUnsupportedKeywords(obj, keywords) {
     return;
   }
 
-  for (const key of Object.keys(obj)) {
-    if (keywords.includes(key) || key.startsWith("x-")) {
-      delete obj[key];
-      continue;
-    }
 
-    const value = obj[key];
     if (value && typeof value === "object") {
+      if (key === "properties" && !Array.isArray(value)) {
+        // Property names are user data, even when they match schema keywords.
+        for (const propertySchema of Object.values(value)) {
+          removeUnsupportedKeywords(propertySchema, keywords);
+        }
+      } else {
       removeUnsupportedKeywords(value, keywords);
+        removeUnsupportedKeywords(value, keywords);
+      }
     }
-  }
 }
 
 // Convert const to enum
@@ -472,5 +473,3 @@ export function normalizeGeminiContents(contents) {
   }
   return out;
 }
-
-

@@ -231,6 +231,17 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   }
   if (customToolNames.size > 0) result._customToolNames = [...customToolNames];
 
+  // Map Responses structured output settings back to Chat Completions.
+  if (result.text?.format) {
+    const format = result.text.format;
+    if (format.type === "json_schema") {
+      result.response_format = { type: "json_schema", json_schema: format };
+    } else if (format.type === "json_object") {
+      result.response_format = { type: "json_object" };
+    }
+    delete result.text;
+  }
+
   // Cleanup Responses API specific fields
   // Map Responses-only max_output_tokens to Chat max_tokens (avoid leaking unknown field upstream)
   if (result.max_output_tokens !== undefined) {
@@ -443,6 +454,34 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
       return tool;
     }).filter(Boolean);
   }
+
+    // Normalize forced function choices to the flat Responses API shape.
+  if (typeof body.tool_choice === "string") {
+    result.tool_choice = body.tool_choice;
+  } else if (body.tool_choice && typeof body.tool_choice === "object") {
+    const choice = body.tool_choice;
+    const fnName = choice.name || choice.function?.name;
+    result.tool_choice = choice.type === OPENAI_BLOCK.FUNCTION && fnName
+      ? { type: OPENAI_BLOCK.FUNCTION, name: fnName }
+      : choice;
+  }
+
+  // Explicit Responses text settings take precedence over Chat response_format.
+  if (body.text !== undefined) {
+    result.text = body.text;
+  } else if (body.response_format?.type === "json_schema") {
+    const rf = body.response_format.json_schema || body.response_format;
+    result.text = { format: {
+      type: "json_schema",
+      name: rf.name,
+      schema: rf.schema,
+      strict: rf.strict,
+      description: rf.description,
+    } };
+  } else if (body.response_format?.type === "json_object") {
+    result.text = { format: { type: "json_object" } };
+  }
+
 
   // Pass through other relevant fields
   if (body.temperature !== undefined) result.temperature = body.temperature;

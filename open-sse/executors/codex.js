@@ -7,6 +7,7 @@ import {
 } from "../services/oauthCredentialManager.js";
 import { normalizeResponsesInput } from "../translator/formats/responsesApi.js";
 import { fetchImageAsBase64 } from "../translator/concerns/image.js";
+import { OPENAI_BLOCK } from "../translator/schema/index.js";
 import { getModelUpstreamId, getProviderModels } from "../config/providerModels.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry } from "../config/runtimeConfig.js";
@@ -96,7 +97,7 @@ function normalizeCodexTools(body) {
       }
       return true;
     }
-    if (type !== "function") {
+    if (type !== OPENAI_BLOCK.FUNCTION) {
       if (CODEX_PASSTHROUGH_TOOL_TYPES.has(type)) return true;
       if (!type || tool.function || typeof tool.name === "string") return false;
       return CODEX_HOSTED_TOOL_TYPES.has(type);
@@ -110,7 +111,7 @@ function normalizeCodexTools(body) {
       ? tool.parameters
       : (fn?.parameters && typeof fn.parameters === "object" && !Array.isArray(fn.parameters) ? fn.parameters : { type: "object", properties: {} });
     for (const k of Object.keys(tool)) delete tool[k];
-    tool.type = "function";
+    tool.type = OPENAI_BLOCK.FUNCTION;
     tool.name = name.slice(0, 128);
     if (description) tool.description = description;
     tool.parameters = stripCodexUnsupportedPatterns(parameters, patternStats);
@@ -122,9 +123,14 @@ function normalizeCodexTools(body) {
   }
   // Drop tool_choice if it references an unknown function name
   if (body.tool_choice && typeof body.tool_choice === "object" && !Array.isArray(body.tool_choice)) {
-    if (body.tool_choice.type === "function") {
-      const n = typeof body.tool_choice.name === "string" ? body.tool_choice.name.trim() : "";
-      if (!n || !validNames.has(n)) delete body.tool_choice;
+    if (body.tool_choice.type === OPENAI_BLOCK.FUNCTION) {
+      const rawName = body.tool_choice.name || body.tool_choice.function?.name;
+      const n = typeof rawName === "string" ? rawName.trim() : "";
+      if (!n || !validNames.has(n)) {
+        delete body.tool_choice;
+      } else {
+        body.tool_choice = { type: OPENAI_BLOCK.FUNCTION, name: n };
+      }
     }
   }
 }

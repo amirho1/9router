@@ -198,6 +198,38 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
     }
   }
 
+    // Apply structured outputs after messages so existing system instructions survive.
+  const responseFormat = body.response_format;
+  if (responseFormat?.type === "json_schema" || responseFormat?.type === "json_object") {
+    result.generationConfig.responseMimeType = "application/json";
+    const jsonInstruction = "You must respond with valid JSON. Respond ONLY with a JSON object, no other text.";
+    let instructionText;
+    if (responseFormat.type === "json_schema") {
+      const rawSchema = responseFormat.json_schema?.schema || responseFormat.schema;
+      if (rawSchema) {
+        try {
+          const responseSchema = cleanJSONSchemaForAntigravity(structuredClone(rawSchema));
+          const schemaJson = JSON.stringify(rawSchema, null, 2);
+          instructionText = `You must respond with valid JSON that strictly follows this JSON schema:\n\`\`\`json\n${schemaJson}\n\`\`\`\nRespond ONLY with the JSON object, no other text.`;
+          result.generationConfig.responseSchema = responseSchema;
+        } catch {
+          // Fail open in JSON mode if schema preparation fails.
+          instructionText = jsonInstruction;
+        }
+      }
+    } else {
+      instructionText = jsonInstruction;
+    }
+    if (instructionText) {
+      if (result.systemInstruction) {
+        result.systemInstruction.parts.push({ text: instructionText });
+      } else {
+        result.systemInstruction = { role: GEMINI_ROLE.USER, parts: [{ text: instructionText }] };
+      }
+    }
+  }
+
+  
   // Convert tools
   if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
     const functionDeclarations = [];
