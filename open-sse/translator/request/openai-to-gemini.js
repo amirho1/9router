@@ -3,6 +3,7 @@ import { FORMATS } from "../formats.js";
 import { DEFAULT_THINKING_AG_SIGNATURE, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE } from "../../config/defaultThinkingSignature.js";
 import { openaiToClaudeRequestForAntigravity } from "./openai-to-claude.js";
 import { getGeminiThoughtSignatureSync } from "../../services/thoughtSignatureStore.js";
+/** @returns {string} Fresh envelope identifier; no caller data is mutated. */
 function generateUUID() {
   return crypto.randomUUID();
 }
@@ -16,14 +17,19 @@ import {
   generateSessionId,
   generateProjectId,
   cleanJSONSchemaForAntigravity,
+  createSchemaBudget,
   normalizeGeminiContents
 } from "../formats/gemini.js";
+import { SCHEMA_PURPOSE } from "../../config/schemaCompatibility.js";
+import { SchemaError, asSchemaError } from "../../utils/schemaErrors.js";
 import { deriveSessionId, toNumericSessionId } from "../../utils/sessionManager.js";
 import { ROLE, GEMINI_ROLE, OPENAI_BLOCK, CLAUDE_BLOCK } from "../schema/index.js";
 
-// Sanitize function names for Gemini API.
-// Gemini requires: starts with [a-zA-Z_], followed by [a-zA-Z0-9_.:\-], max 64 chars.
-// Replace any invalid character with '_' and truncate to 64.
+/**
+ * Normalize a function name to Gemini's identifier alphabet and 64-character limit.
+ * @param {string} name - Caller name, never mutated.
+ * @returns {string} Provider-compatible name with a valid first character.
+ */
 function sanitizeGeminiFunctionName(name) {
   if (!name) return "_unknown";
   // Replace any char not in [a-zA-Z0-9_.:\-] with '_'
@@ -36,8 +42,20 @@ function sanitizeGeminiFunctionName(name) {
   return sanitized.substring(0, 64);
 }
 
-// Core: Convert OpenAI request to Gemini format (base for all variants)
+/**
+ * Translate Chat requests while preserving caller schemas and system instructions.
+ * Schema budgets cover response and tool schemas together (SCHEMA_LIMITS).
+ * @param {string} model - Target model identifier.
+ * @param {Object} body - Read-only Chat request.
+ * @param {boolean} stream - Requested transport mode.
+ * @param {string} [signature] - Default thought signature for tool history.
+ * @param {string|null} [sessionId=null] - Session used for cached signatures.
+ * @returns {Object} Newly constructed Gemini request with bounded, owned schemas.
+ * @throws {SchemaError} Invalid schemas (400) or unexpected preparation failures (500).
+ */
 function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE, sessionId = null) {
+  // Response and tool schemas share request-wide processing limits.
+  const schemaBudget = createSchemaBudget();
   const result = {
     model: model,
     contents: [],
@@ -198,24 +216,30 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
     }
   }
 
-    // Apply structured outputs after messages so existing system instructions survive.
+  // Apply structured outputs after messages so existing system instructions survive.
   const responseFormat = body.response_format;
   if (responseFormat?.type === "json_schema" || responseFormat?.type === "json_object") {
     result.generationConfig.responseMimeType = "application/json";
     const jsonInstruction = "You must respond with valid JSON. Respond ONLY with a JSON object, no other text.";
     let instructionText;
     if (responseFormat.type === "json_schema") {
-      const rawSchema = responseFormat.json_schema?.schema || responseFormat.schema;
-      if (rawSchema) {
-        try {
-          const responseSchema = cleanJSONSchemaForAntigravity(structuredClone(rawSchema));
-          const schemaJson = JSON.stringify(rawSchema, null, 2);
-          instructionText = `You must respond with valid JSON that strictly follows this JSON schema:\n\`\`\`json\n${schemaJson}\n\`\`\`\nRespond ONLY with the JSON object, no other text.`;
-          result.generationConfig.responseSchema = responseSchema;
-        } catch {
-          // Fail open in JSON mode if schema preparation fails.
-          instructionText = jsonInstruction;
-        }
+      const nested = responseFormat.json_schema?.schema !== undefined;
+      const rawSchema = nested ? responseFormat.json_schema.schema : responseFormat.schema;
+      const location = nested ? "response_format.json_schema.schema" : "response_format.schema";
+      try {
+        if (!rawSchema || typeof rawSchema !== "object" || Array.isArray(rawSchema)) throw new SchemaError("schema_shape");
+        // Response purpose preserves empty objects; the original schema remains
+        // in prompt guidance, alongside the caller's existing system instructions.
+        const responseSchema = cleanJSONSchemaForAntigravity(rawSchema, {
+          purpose: SCHEMA_PURPOSE.RESPONSE, budget: schemaBudget, location,
+        });
+        const schemaJson = JSON.stringify(rawSchema, null, 2);
+        instructionText = `You must respond with valid JSON that strictly follows this JSON schema:\n\`\`\`json\n${schemaJson}\n\`\`\`\nRespond ONLY with the JSON object, no other text.`;
+        result.generationConfig.responseSchema = responseSchema;
+      } catch (error) {
+        // Explicit schemas fail closed, including unexpected preparation bugs.
+        // Never silently substitute generic JSON or expose the original exception.
+        throw asSchemaError(error, location);
       }
     } else {
       instructionText = jsonInstruction;
@@ -236,7 +260,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
     for (const t of body.tools) {
       // Check if already in Anthropic/Claude format (no type field, direct name/description/input_schema)
       if (t.name && t.input_schema) {
-        const cleanedSchema = cleanJSONSchemaForAntigravity(structuredClone(t.input_schema || { type: "object", properties: {} }));
+        const cleanedSchema = cleanJSONSchemaForAntigravity(t.input_schema || { type: "object", properties: {} }, { budget: schemaBudget });
         functionDeclarations.push({
           name: sanitizeGeminiFunctionName(t.name),
           description: t.description || "",
@@ -246,7 +270,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
       // OpenAI format
       else if (t.type === OPENAI_BLOCK.FUNCTION && t.function) {
         const fn = t.function;
-        const cleanedSchema = cleanJSONSchemaForAntigravity(structuredClone(fn.parameters || { type: "object", properties: {} }));
+        const cleanedSchema = cleanJSONSchemaForAntigravity(fn.parameters || { type: "object", properties: {} }, { budget: schemaBudget });
         functionDeclarations.push({
           name: sanitizeGeminiFunctionName(fn.name),
           description: fn.description || "",
@@ -274,22 +298,7 @@ export function openaiToGeminiCLIRequest(model, body, stream, credentials = null
   const gemini = openaiToGeminiBase(model, body, stream, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE, credentials?._clientSessionId);
   // Thinking is normalized centrally by applyThinking (thinkingUnified.js) after translation.
 
-  // Clean schema for tools
-  if (gemini.tools?.[0]?.functionDeclarations) {
-    for (const fn of gemini.tools[0].functionDeclarations) {
-      if (fn.parameters) {
-        const cleanedSchema = cleanJSONSchemaForAntigravity(fn.parameters);
-        fn.parameters = cleanedSchema;
-        // if (isClaude) {
-        //   fn.parameters = cleanedSchema;
-        // } else {
-        //   fn.parametersJsonSchema = cleanedSchema;
-        //   delete fn.parameters;
-        // }
-      }
-    }
-  }
-
+  // The base translator already cleaned and budgeted every schema.
   return gemini;
 }
 
@@ -329,8 +338,17 @@ function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, isAntigra
   return envelope;
 }
 
-// Wrap Claude format in Cloud Code envelope for Antigravity
+/**
+ * Build Antigravity's Claude envelope, budgeting all tool schemas together.
+ * @param {string} model - Target Claude model.
+ * @param {Object} claudeRequest - Read-only translated request.
+ * @param {Object|null} [credentials=null] - Read-only project/session metadata.
+ * @param {string} [signature] - Default thought signature.
+ * @returns {Object} New envelope with owned tool schemas and preserved instructions.
+ * @throws {SchemaError} If a tool schema is invalid or cannot be prepared safely.
+ */
 function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = null, signature = DEFAULT_THINKING_AG_SIGNATURE) {
+  const schemaBudget = createSchemaBudget();
   const projectId = credentials?.projectId || generateProjectId();
 
   const envelope = {
@@ -426,7 +444,7 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
     const functionDeclarations = [];
     for (const tool of claudeRequest.tools) {
       if (tool.name && tool.input_schema) {
-        const cleanedSchema = cleanJSONSchemaForAntigravity(tool.input_schema);
+        const cleanedSchema = cleanJSONSchemaForAntigravity(tool.input_schema, { budget: schemaBudget });
         functionDeclarations.push({
           name: sanitizeGeminiFunctionName(tool.name),
           description: tool.description || "",

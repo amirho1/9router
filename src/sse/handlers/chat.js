@@ -162,7 +162,15 @@ export async function handleChat(request, clientRawRequest = null) {
 }
 
 /**
- * Handle single model chat request
+ * Route one model through available accounts, stopping on local schema failures.
+ * @param {Object} body - Request forwarded with the resolved model identifier.
+ * @param {string} modelStr - Requested model or combo alias.
+ * @param {Object|null} [clientRawRequest=null] - Original request metadata.
+ * @param {Request|null} [request=null] - Client request for format/header detection.
+ * @param {string|null} [apiKey=null] - Client key used by existing usage tracking.
+ * @param {string|null} [requestedModel=null] - Original context-qualified model.
+ * @returns {Promise<Response>} HTTP response; local schema errors never cool down
+ * an account or select another one. Provider credentials may be refreshed normally.
  */
 async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, requestedModel = null) {
   const modelInfo = await getModelInfo(modelStr);
@@ -311,7 +319,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
-    if (result.success) return result.response;
+    // Local schema failures describe the request/gateway, not account health.
+    if (result.success || result.nonRetryable) return result.response;
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;

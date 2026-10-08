@@ -2,6 +2,7 @@
 
 ## Fixes
 
+- **Antigravity structured assessments**: replace broken schema cleanup with bounded local-reference resolution and constraint intersection; preserve nullable fields and compile consecutive integer literals to exact bounds (including nullable 0–4 ratings). Response objects no longer receive tool placeholders. Explicit schemas fail closed with safe HTTP 400 validation errors or HTTP 500 `schema_preparation_failed` errors, without provider generation, account cooldown, or combo fallback. Existing unrelated keyword cleanup and `responseSchema` transport remain unchanged.
 - **Structured outputs**: preserve JSON formats and schema guidance for Gemini/Antigravity, retain schema fields named like metadata (such as `title`), translate structured output formats between Chat Completions and Responses, and retain valid forced function choices for Codex.
 
 # v0.5.95 (2026-10-01)

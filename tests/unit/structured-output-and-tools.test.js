@@ -206,10 +206,9 @@ describe.each([
     });
   });
 
-  it("enables JSON mode without a schema", () => {
-    const result = translate({ messages, response_format: { type: "json_schema" } });
-    expect(result.generationConfig).toEqual({ responseMimeType: "application/json" });
-    expect(result.systemInstruction).toBeUndefined();
+  it("rejects an explicit structured format without a schema", () => {
+    expect(() => translate({ messages, response_format: { type: "json_schema" } }))
+      .toThrow(expect.objectContaining({ code: "schema_shape", status: 400 }));
   });
 
   it.each([undefined, null, { type: "text" }, { type: "unknown" }])("ignores unsupported or absent format %j", (response_format) => {
@@ -218,22 +217,18 @@ describe.each([
     expect(result.systemInstruction).toBeUndefined();
   });
 
-  it.each(["cleaning", "serialization"])("keeps JSON mode and existing instructions when schema %s fails", (stage) => {
+  it.each(["cleaning", "serialization"])("fails closed when schema %s fails", (stage) => {
     const schema = makeSchema();
     if (stage === "cleaning") {
       vi.spyOn(geminiHelpers, "cleanJSONSchemaForAntigravity").mockImplementationOnce(() => { throw new Error("clean failed"); });
     } else {
-      // Cleaning removes this unsupported keyword, but serializing the original schema fails.
+      // A non-JSON value must become a safe preparation error, never generic JSON mode.
       schema.default = 1n;
     }
-    const result = translate({
+    expect(() => translate({
       messages: [{ role: ROLE.SYSTEM, content: "Keep the title short." }, ...messages],
       response_format: { type: "json_schema", json_schema: { schema } },
-    });
-    expect(result.generationConfig).toEqual({ responseMimeType: "application/json" });
-    expect(result.systemInstruction.parts).toEqual([
-      { text: "Keep the title short." }, { text: JSON_INSTRUCTION },
-    ]);
+    })).toThrow(expect.objectContaining({ code: "schema_preparation_failed", status: 500 }));
   });
 });
 

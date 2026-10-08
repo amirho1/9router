@@ -4,6 +4,7 @@
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
 import { unavailableResponse } from "../utils/error.js";
+import { isLocalSchemaFailure } from "../utils/schemaErrors.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
 
@@ -275,7 +276,8 @@ export function getComboModelsFromData(modelStr, combosData) {
  * @param {string} [options.comboName] - Name of the combo (for round-robin tracking)
  * @param {string} [options.comboStrategy] - Strategy: "fallback" or "round-robin"
  * @param {number|string} [options.comboStickyLimit=1] - Requests per combo model before switching
- * @returns {Promise<Response>}
+ * @returns {Promise<Response>} First success or terminal failure; locally marked
+ * schema errors return immediately without consuming another model attempt.
  */
 export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true }) {
   // Apply rotation strategy if enabled
@@ -303,6 +305,9 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
     try {
       const result = await handleSingleModel(body, modelStr);
+      // Local preparation bugs can be HTTP 500, but another model/account cannot
+      // repair them. The private marker cannot be supplied by upstream JSON.
+      if (isLocalSchemaFailure(result)) return result;
       
       // Success (2xx) - return response
       if (result.ok) {

@@ -5,7 +5,8 @@ import { OAUTH_ENDPOINTS, ANTIGRAVITY_HEADERS, AG_DEFAULT_TOOLS, AG_TOOL_SUFFIX,
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { resolveSessionId, toNumericSessionId } from "../utils/sessionManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
-import { cleanJSONSchemaForAntigravity, normalizeGeminiContents } from "../translator/formats/gemini.js";
+import { cleanJSONSchemaForAntigravity, createSchemaBudget, normalizeGeminiContents } from "../translator/formats/gemini.js";
+import { SCHEMA_PURPOSE } from "../config/schemaCompatibility.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
 import { getGeminiThoughtSignatureSync } from "../services/thoughtSignatureStore.js";
 
@@ -134,6 +135,17 @@ export class AntigravityExecutor extends BaseExecutor {
     };
   }
 
+  /**
+   * Prepare the provider envelope and validate native or translated schemas.
+   * Schema inputs are copied; existing envelope normalization may mutate other
+   * body fields. Tool and response schemas share SCHEMA_LIMITS request counters.
+   * @param {string} model - Target provider model.
+   * @param {Object} body - Request envelope to normalize before any generation call.
+   * @param {boolean} stream - Whether the upstream request is streaming.
+   * @param {Object} credentials - Read-only account, project and session metadata.
+   * @returns {Object} Provider payload with response-purpose schema cleanup.
+   * @throws {SchemaError} HTTP 400 validation failures or safe HTTP 500 preparation errors.
+   */
   transformRequest(model, body, stream, credentials) {
     const projectId = credentials?.projectId || this.generateProjectId();
 
@@ -234,6 +246,8 @@ export class AntigravityExecutor extends BaseExecutor {
     });
     const contents = normalizeGeminiContents(rawContents);
 
+    // Validate native requests too, sharing limits across response/tool schemas.
+    const schemaBudget = createSchemaBudget();
     // Sanitize tool schemas and function names before sending to Antigravity.
     let tools = body.request?.tools;
 
@@ -249,9 +263,9 @@ export class AntigravityExecutor extends BaseExecutor {
           allDeclarations.push({
             ...fn,
             name,
-            parameters: fn.parameters
-              ? cleanJSONSchemaForAntigravity(structuredClone(fn.parameters))
-              : { type: "object", properties: { reason: { type: "string", description: "Brief explanation" } }, required: ["reason"] }
+            parameters: cleanJSONSchemaForAntigravity(fn.parameters ?? { type: "object", properties: {} }, {
+              budget: schemaBudget, location: "request.tools.functionDeclarations.parameters",
+            })
           });
         }
       }
@@ -274,6 +288,13 @@ export class AntigravityExecutor extends BaseExecutor {
     }
 
     const generationConfig = { ...(requestWithoutTools.generationConfig || {}) };
+    // Response mode prevents invented tool arguments and is stable on a second pass.
+    if (generationConfig.responseSchema !== undefined) {
+      generationConfig.responseSchema = cleanJSONSchemaForAntigravity(generationConfig.responseSchema, {
+        purpose: SCHEMA_PURPOSE.RESPONSE, budget: schemaBudget,
+        location: "request.generationConfig.responseSchema",
+      });
+    }
     if (generationConfig.maxOutputTokens > MAX_ANTIGRAVITY_OUTPUT_TOKENS) {
       generationConfig.maxOutputTokens = MAX_ANTIGRAVITY_OUTPUT_TOKENS;
     }

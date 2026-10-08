@@ -9,6 +9,7 @@ import { createRequestLogger } from "../utils/requestLogger.js";
 import { getModelTargetFormat, getModelSupportedFormats, getModelStrip, getModelUpstreamId, getModelType, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 import { PROVIDERS } from "../config/providers.js";
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
+import { SchemaError, schemaErrorResult } from "../utils/schemaErrors.js";
 import { upstreamResponseHeaders } from "../utils/upstreamHeaders.js";
 import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
@@ -34,13 +35,6 @@ import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translato
 import { resolveSessionId } from "../utils/sessionManager.js";
 
 /**
- * Core chat handler - shared between SSE and Worker
- * @param {object} options.body - Request body
- * @param {object} options.modelInfo - { provider, model }
- * @param {object} options.credentials - Provider credentials
- * @param {string} options.sourceFormatOverride - Override detected source format (e.g. "openai-responses")
- */
-/**
  * Remove translator-internal continuity fields from the outbound upstream
  * body. The Responses→Chat request translator stashes reasoning
  * `encrypted_content` on assistant messages so a later openai→responses
@@ -60,6 +54,17 @@ export function stripContinuityFields(body) {
   return body;
 }
 
+/**
+ * Translate and dispatch a chat request, converting local schema failures to safe
+ * non-retryable HTTP results. Pending tracking starts only before executor work.
+ * @param {Object} options - Routing, logging, transforms and lifecycle callbacks.
+ * @param {Object} options.body - Request; existing normalization may mutate messages.
+ * @param {Object} options.modelInfo - Resolved provider/model identifiers.
+ * @param {Object} options.credentials - Credentials updated by transport/refresh logic.
+ * @param {string} [options.sourceFormatOverride] - Override automatic format detection.
+ * @returns {Promise<Object>} Gateway result containing an HTTP Response; schema
+ * errors return 400/500 with nonRetryable=true, without provider retry or cooldown.
+ */
 export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
@@ -203,7 +208,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
   } else {
-    translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
+    try {
+      translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
+    } catch (error) {
+      if (!(error instanceof SchemaError)) throw error;
+      // No pending counter has started here. Log category/location only.
+      log?.warn?.("SCHEMA", `${error.code} at ${error.location}`);
+      return schemaErrorResult(error);
+    }
     if (!translatedBody) {
       trackPendingRequest(model, provider, connectionId, false, true);
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
@@ -397,6 +409,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
   } catch (error) {
     trackPendingRequest(model, provider, connectionId, false, true);
+    // Native executor validation happens before generation calls and retries.
+    // Avoid provider-error logs, which may otherwise capture full request data.
+    if (error instanceof SchemaError) {
+      streamController.handleComplete();
+      log?.warn?.("SCHEMA", `${error.code} at ${error.location}`);
+      appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.status}` }).catch(() => { });
+      return schemaErrorResult(error);
+    }
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
